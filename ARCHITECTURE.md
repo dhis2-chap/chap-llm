@@ -5,14 +5,14 @@ LLM-based building blocks that explain Chap ML results to different audiences.
 ## Pipeline
 
 ```
-Chap output → adapter → contract → facts layer → prompt → LLM → output check → eval harness
+Chap output → contract → adapter → facts layer → prompt → LLM → output check → eval harness
 ```
 
 ```mermaid
 flowchart LR
     Input([Chap output\n.nc / API / LIME])
-    A[Adapter\nreads Chap output\ncalls chap-core APIs]
-    B[Contract\nPydantic model]
+    A[Contract\nPydantic model]
+    B[Adapter\nreads Chap output\ncalls chap-core APIs]
     C[Facts layer\nclassifies in code\nfilters by audience]
     D[Prompt builder\naudience profile\n+ selected facts]
     E[LLM client\nprovider-agnostic]
