@@ -2,24 +2,39 @@
 
 LLM-based building blocks that explain Chap ML results to different audiences.
 
-## Pipeline
+## Design order
 
+We define the contract before building the adapter. The contract is the stable interface the rest of the system depends on. Adapters (CLI now, REST API later) only fill it.
+
+```mermaid
+flowchart LR
+    S1([1. Inspect Chap output\nmetrics.csv, .nc structure,\nchap-core functions])
+    S2[/2. Design contract\nPydantic models per result type/]
+    S3[3. Build adapter\nfills the contract]
+    S4[4. Facts layer, prompts,\nLLM client, output check]
+    S5{{5. Eval harness\ntests the pipeline}}
+
+    S1 --> S2 --> S3 --> S4 --> S5
+    S2 -.hand-made test objects.-> S4
 ```
-Chap output → adapter → contract → facts layer → prompt → LLM → output check → eval harness
-```
+
+## Runtime data flow
 
 ```mermaid
 flowchart LR
     Input([Chap output\n.nc / API / LIME])
-    A[Adapter\nreads Chap output\ncalls chap-core APIs]
-    B[Contract\nPydantic model]
+    B[Adapter\nreads Chap output\ncalls chap-core APIs]
+    A[/Contract\nPydantic objects/]
     C[Facts layer\nclassifies in code\nfilters by audience]
     D[Prompt builder\naudience profile\n+ selected facts]
     E[LLM client\nprovider-agnostic]
-    F[Output check\nnumbers match facts]
+    F[Output check\nnumbers match facts\nfallback on failure]
     G([ExplanationResponse\ntext + chart_data\n+ source_facts])
+    H{{Eval harness\noffline: deterministic checks,\nLLM-as-judge, human calibration}}
 
-    Input --> A --> B --> C --> D --> E --> F --> G
+    Input --> B --> A --> C --> D --> E --> F --> G
+    H -.tests.-> C
+    H -.tests.-> G
 ```
 
 | Layer | Responsibility | Must NOT |
@@ -140,6 +155,57 @@ from chap_core.assessment.thresholds.percentile import filter_to_baseline
 | `source_facts` returned in every response | Enables output check and prompt debugging without re-running |
 | chap_llm returns JSON, frontend renders | Separation of concerns; Modeling App uses Highcharts |
 | Local LLM or Claude API with anonymized data only | Data sovereignty — no raw case data or identifiable locations to external API |
+
+## Privacy — what is sent to an external LLM
+
+**Rule: nothing identifiable or raw leaves the system when using an external LLM provider.**
+
+The facts layer is the privacy boundary. Everything passed to the LLM client must already be anonymized and aggregated. The LLM client itself does no anonymization — it only sends what the facts layer gives it.
+
+### What must be anonymized before the LLM call
+
+| Data type | Raw form | Anonymized form |
+|---|---|---|
+| Location names | "Vientiane", "Attapeu" | "District A", "District B" (or omitted) |
+| Model name | "chap_ewars_v2" | can be kept — not health data |
+| Case counts | 142 cases | never sent — only derived metrics |
+| Metric values | CRPS=0.45, MAE=12.3 | kept as-is — aggregated, not individual |
+| Sensitivity/specificity | 0.80 / None | kept — no individual records |
+| Baseline years | 2010–2011 | kept — calendar metadata only |
+| Split dates | "2012-11-01" | kept — temporal metadata only |
+| Alert counts | tp=4, fp=1 | kept — aggregated counts |
+
+### Two deployment modes
+
+```
+Mode A — fully local (strict)
+  facts layer → Ollama/Mistral on the same server
+  Nothing leaves the country. Works offline.
+  No anonymization needed — model runs locally.
+
+Mode B — external with anonymization (pragmatic)
+  facts layer → anonymizer → Claude API (or other)
+  Location names replaced. Raw counts never included.
+  Only aggregated, classified metrics are sent.
+```
+
+The caller sets the mode via the LLM client configuration. The facts layer output is identical in both modes — the anonymizer is a thin wrapper applied only in Mode B before the prompt is built.
+
+### What the prompt MAY contain (Mode B)
+
+- Metric values: CRPS, MAE, ratio_above_truth, coverage, sensitivity, specificity
+- Qualitative classifications: "moderate accuracy", "low sensitivity"
+- Counts: n_splits, n_evaluated, tp, fp, fn, tn
+- Temporal metadata: n years of baseline, max horizon
+- Anonymized location placeholders if per-location breakdown is included
+- Audience identifier
+
+### What the prompt must NEVER contain (Mode B)
+
+- Real location names or district identifiers
+- Raw case counts (individual or aggregate)
+- Patient-level or individual-level data of any kind
+- Model training data
 
 ## Known limitations
 

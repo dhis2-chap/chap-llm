@@ -9,7 +9,7 @@ Sjekk `FINDINGS.md` (gitignored, lokal) for funn fra tidligere økter.
 - **Gjenbruk chap-core.** Metrikker, terskler og scoring reimplementeres ikke.
 - **Koden regner, LLM-en formulerer.** Alle tall og klassifiseringer gjøres i kode (facts-laget) før LLM-kallet.
 - **Ingen leverandørbinding.** LLM-klienten støtter lokal LLM og ekstern API — ikke lås til én.
-- **Privacy.** Send aldri rå case-tall eller lokasjonsnavn til ekstern LLM. Kun pre-aggregerte metrikker.
+- **Privacy.** Facts-laget er personverngrensen. Ingenting identifiserbart eller rått sendes til ekstern LLM — kun anonymiserte, aggregerte metrikker. Stedsnavn erstattes alltid. Se "Privacy" i `ARCHITECTURE.md`.
 - **Test før du går videre.** Ny kode → pytest-tester → grønt → neste steg.
 - **Visualisering.** `chap_llm` returnerer JSON. Frontend renderer. Ingen PNG/HTML her.
 
