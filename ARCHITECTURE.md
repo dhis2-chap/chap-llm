@@ -64,7 +64,7 @@ Audience is a parameter passed by the caller — never inferred automatically.
 | Value | Reader | Focus |
 |---|---|---|
 | `epidemiologist` | Technical — understands CRPS, sensitivity, baselines | Full metric detail, caveats, methodology |
-| `district_health_manager` | Operational — acts on alerts | Whether the model can be trusted for decisions, what alerts mean |
+| `district_health_officer` | Operational — acts on alerts | Whether the model can be trusted for decisions, what alerts mean |
 | `decision_maker` | Strategic — allocates resources | High-level reliability, what the system does and doesn't know |
 
 The facts layer filters which facts are included per audience. The prompt template sets tone and detail level.
@@ -75,7 +75,7 @@ Every LLM endpoint returns an `ExplanationResponse`:
 
 ```python
 class ExplanationResponse(BaseModel):
-    audience: Literal["epidemiologist", "district_health_manager", "decision_maker"]
+    audience: Literal["epidemiologist", "district_health_officer", "decision_maker"]
     result_type: Literal["evaluation", "xai", "alarm"]
     explanation_text: str          # natural language, written by the LLM
     chart_data: dict | None        # structured JSON for the frontend to render
@@ -206,6 +206,35 @@ The caller sets the mode via the LLM client configuration. The facts layer outpu
 - Raw case counts (individual or aggregate)
 - Patient-level or individual-level data of any kind
 - Model training data
+
+## Keeping up with chap-core changes
+
+Three kinds of change can happen in chap-core, and each requires a different response.
+
+### Type 1 — Format change (file structure, variable names, API)
+
+Only the adapter is affected. The contract, facts layer, prompts and eval harness notice nothing.
+
+**How we handle it:** the adapter is the only place that imports from chap-core. Update the adapter, re-run tests. Everything else stays the same.
+
+**Example already seen:** between v2.5.1 and v2.7.0, outbreak metrics were removed from the CLI. Only the adapter needed updating.
+
+### Type 2 — Meaning change (how metrics or "outbreak" is defined)
+
+This is dangerous because it can pass silently. The adapter still fills the contract, but the numbers mean something different and explanations become wrong without anything crashing.
+
+**How we protect against it:**
+
+1. **Use chap-core's own functions** (`calculate_metrics()`, `score()`, `label_cells()`) instead of reimplementing. When Chap changes its definition, we follow automatically.
+2. **Include metadata in the contract.** `EvaluationResult` carries `schema_version`, `model_version`, and `AlertPolicyInfo` (strategy, quantile, baseline years, exceedance threshold). Every explanation states what it is built on.
+3. **Contract tests against real output (golden files).** If numbers change after a chap-core update, the test fails immediately. See `tests/test_evaluation_adapter.py` — it compares against `chap-core/metrics.csv`.
+4. **Pin the chap-core version and upgrade deliberately.** `pyproject.toml` uses an editable install from the clone. Upgrading the clone is a conscious act, not an accident.
+
+### Type 3 — New result types or new audience needs
+
+A normal evolution, not a breaking change.
+
+**How we handle it:** add new fields as `Optional` in the contract. Old code continues to work. New code can use the new fields. Never remove or rename existing fields without a version bump in `schema_version`.
 
 ## Known limitations
 
