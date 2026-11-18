@@ -28,7 +28,7 @@ from chap_llm.facts._thresholds import (
     SENSITIVITY_LOW,
 )
 
-Audience = Literal["epidemiologist", "district_health_manager", "decision_maker"]
+Audience = Literal["epidemiologist", "district_health_officer", "decision_maker"]
 
 
 # ── classifiers ───────────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ def classify_evaluation(
 
     Args:
         result:   EvaluationResult from the adapter.
-        audience: One of "epidemiologist", "district_health_manager",
+        audience: One of "epidemiologist", "district_health_officer",
                   "decision_maker".
 
     Returns:
@@ -174,8 +174,8 @@ def _filter_for_audience(facts: dict, audience: Audience) -> dict:
         }
         return {k: v for k, v in facts.items() if k not in remove}
 
-    # district_health_manager: operational — no crps_norm internals
-    if audience == "district_health_manager":
+    # district_health_officer: operational — no crps_norm internals
+    if audience == "district_health_officer":
         remove = {
             "crps", "ratio_above_truth",
             "coverage_10_90", "coverage_25_75",

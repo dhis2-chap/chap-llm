@@ -151,7 +151,7 @@ def test_decision_maker_no_raw_metrics():
 
 
 def test_district_manager_no_crps_raw():
-    facts = classify_evaluation(_make_result(), "district_health_manager")
+    facts = classify_evaluation(_make_result(), "district_health_officer")
     assert "crps" not in facts
     # but gets mae and counts
     assert "mae" in facts
@@ -159,7 +159,7 @@ def test_district_manager_no_crps_raw():
 
 
 def test_location_map_in_all_audiences():
-    for audience in ("epidemiologist", "district_health_manager", "decision_maker"):
+    for audience in ("epidemiologist", "district_health_officer", "decision_maker"):
         facts = classify_evaluation(_make_result(), audience)
         assert "location_map" in facts
         # real names must not appear as values
