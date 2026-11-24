@@ -14,7 +14,7 @@ from chap_llm.contracts.evaluation import (
     OutbreakMetrics,
 )
 from chap_llm.facts.evaluation import classify_evaluation
-from chap_llm.facts._anonymize import anonymize_locations
+from chap_llm.facts import anonymize_locations
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ def _make_result(
     ratio=0.5, cov_10_90=0.80, cov_25_75=0.50,
     sensitivity=0.8, specificity=0.9,
     tp=8, fp=1, fn=2, tn=9,
-    locations=("Vientiane", "Attapeu", "Luang"),
+    locations=("City A", "City B", "City C"),
 ) -> EvaluationResult:
     policy = AlertPolicyInfo(
         strategy="percentile", quantile=0.75,
@@ -61,9 +61,9 @@ def _make_result(
 # ── anonymization ─────────────────────────────────────────────────────────────
 
 def test_anonymize_replaces_all_names():
-    mapping = anonymize_locations(["Vientiane", "Attapeu", "Luang"])
+    mapping = anonymize_locations(["City A", "City B", "City C"])
     assert set(mapping.values()) == {"District A", "District B", "District C"}
-    assert "Vientiane" not in mapping.values()
+    assert "City A" not in mapping.values()
 
 
 def test_anonymize_is_deterministic():
@@ -82,21 +82,21 @@ def test_anonymize_sorts_before_labelling():
 # ── classification ────────────────────────────────────────────────────────────
 
 def test_crps_quality_good():
-    facts = classify_evaluation(_make_result(crps_norm=0.75), "epidemiologist")
+    facts = classify_evaluation(_make_result(crps_norm=0.5), "epidemiologist")
     assert facts["crps_quality"] == "good"
-    assert facts["beats_baseline"] is True
+    assert "beats_baseline" not in facts
 
 
 def test_crps_quality_moderate():
-    facts = classify_evaluation(_make_result(crps_norm=0.95), "epidemiologist")
+    facts = classify_evaluation(_make_result(crps_norm=1.0), "epidemiologist")
     assert facts["crps_quality"] == "moderate"
-    assert facts["beats_baseline"] is True
+    assert "beats_baseline" not in facts
 
 
 def test_crps_quality_poor():
-    facts = classify_evaluation(_make_result(crps_norm=1.1), "epidemiologist")
+    facts = classify_evaluation(_make_result(crps_norm=2.0), "epidemiologist")
     assert facts["crps_quality"] == "poor"
-    assert facts["beats_baseline"] is False
+    assert "beats_baseline" not in facts
 
 
 def test_calibration_well_calibrated():
@@ -105,13 +105,14 @@ def test_calibration_well_calibrated():
 
 
 def test_calibration_overestimates():
-    # ratio < 0.4: most samples above truth → model predicts too high
-    facts = classify_evaluation(_make_result(ratio=0.3), "epidemiologist")
+    # ratio=0.7 → 70% of samples above observed → model predicts too high
+    facts = classify_evaluation(_make_result(ratio=0.7), "epidemiologist")
     assert facts["calibration"] == "overestimates"
 
 
 def test_calibration_underestimates():
-    facts = classify_evaluation(_make_result(ratio=0.7), "epidemiologist")
+    # ratio=0.3 → only 30% of samples above observed → model predicts too low
+    facts = classify_evaluation(_make_result(ratio=0.3), "epidemiologist")
     assert facts["calibration"] == "underestimates"
 
 
@@ -130,6 +131,30 @@ def test_sensitivity_high():
         "epidemiologist",
     )
     assert facts["sensitivity_level"] == "high"
+
+
+def test_coverage_good():
+    # Both values exactly at nominal → good
+    facts = classify_evaluation(
+        _make_result(cov_10_90=0.80, cov_25_75=0.50), "epidemiologist"
+    )
+    assert facts["coverage_quality"] == "good"
+
+
+def test_coverage_poor_underdispersed():
+    # Far below nominal → overconfident intervals → poor
+    facts = classify_evaluation(
+        _make_result(cov_10_90=0.50, cov_25_75=0.20), "epidemiologist"
+    )
+    assert facts["coverage_quality"] == "poor"
+
+
+def test_coverage_poor_overdispersed():
+    # Far above nominal → intervals too wide → also poor
+    facts = classify_evaluation(
+        _make_result(cov_10_90=0.99, cov_25_75=0.90), "epidemiologist"
+    )
+    assert facts["coverage_quality"] == "poor"
 
 
 # ── audience filter ───────────────────────────────────────────────────────────
@@ -158,10 +183,11 @@ def test_district_manager_no_crps_raw():
     assert "tp" in facts
 
 
-def test_location_map_in_all_audiences():
+def test_locations_anonymized_in_all_audiences():
     for audience in ("epidemiologist", "district_health_officer", "decision_maker"):
         facts = classify_evaluation(_make_result(), audience)
-        assert "location_map" in facts
-        # real names must not appear as values
-        for real_name in ("Vientiane", "Attapeu", "Luang"):
-            assert real_name not in facts["location_map"].values()
+        assert "locations" in facts
+        assert "location_map" not in facts
+        # real names must not appear — only placeholders like "District A"
+        for real_name in ("City A", "City B", "City C"):
+            assert real_name not in facts["locations"]

@@ -14,18 +14,21 @@ from typing import Literal
 from chap_llm.contracts.evaluation import EvaluationResult
 from chap_llm.facts._anonymize import anonymize_locations
 from chap_llm.facts._thresholds import (
-    COVERAGE_10_90_GOOD,
-    COVERAGE_10_90_LOW,
-    COVERAGE_25_75_GOOD,
-    COVERAGE_25_75_LOW,
-    CRPS_NORM_BASELINE,
+    COVERAGE_10_90_NOMINAL,
+    COVERAGE_25_75_NOMINAL,
+    COVERAGE_GOOD_TOLERANCE,
+    COVERAGE_MODERATE_TOLERANCE,
     CRPS_NORM_GOOD,
+    CRPS_NORM_MODERATE,
     MIN_EVALUATED_TO_JUDGE,
+    MIN_NON_OUTBREAKS_TO_JUDGE,
     MIN_OUTBREAKS_TO_JUDGE,
     RATIO_CALIBRATED_HIGH,
     RATIO_CALIBRATED_LOW,
     SENSITIVITY_HIGH,
     SENSITIVITY_LOW,
+    SPECIFICITY_HIGH,
+    SPECIFICITY_LOW,
 )
 
 Audience = Literal["epidemiologist", "district_health_officer", "decision_maker"]
@@ -34,30 +37,47 @@ Audience = Literal["epidemiologist", "district_health_officer", "decision_maker"
 # ── classifiers ───────────────────────────────────────────────────────────────
 
 def _crps_quality(crps_norm: float | None) -> str:
-    """Classify overall accuracy from crps_norm."""
+    """Classify overall accuracy from crps_norm.
+
+    crps_norm = CRPS / observed_range. Lower is better.
+    Bands are placeholders pending reference group validation (CLIM-1881).
+    """
     if crps_norm is None:
         return "unknown"
     if crps_norm <= CRPS_NORM_GOOD:
         return "good"
-    if crps_norm <= CRPS_NORM_BASELINE:
+    if crps_norm <= CRPS_NORM_MODERATE:
         return "moderate"
     return "poor"
 
 
 def _calibration(ratio: float) -> str:
-    """Classify forecast bias from ratio_above_truth."""
+    """Classify forecast bias from ratio_above_truth.
+
+    ratio_above_truth = share of forecast samples above the observed value.
+    > 0.5 → more samples above than below → over-prediction bias.
+    < 0.5 → fewer samples above than below → under-prediction bias.
+    """
     if RATIO_CALIBRATED_LOW <= ratio <= RATIO_CALIBRATED_HIGH:
         return "well_calibrated"
-    if ratio < RATIO_CALIBRATED_LOW:
-        return "overestimates"   # most samples above truth → model predicts too high
-    return "underestimates"      # most samples below truth → model predicts too low
+    if ratio > RATIO_CALIBRATED_HIGH:
+        return "overestimates"   # most samples above truth → predicts too high
+    return "underestimates"      # most samples below truth → predicts too low
 
 
 def _coverage_quality(coverage_10_90: float, coverage_25_75: float) -> str:
-    """Classify interval coverage."""
-    if coverage_10_90 >= COVERAGE_10_90_GOOD and coverage_25_75 >= COVERAGE_25_75_GOOD:
+    """Classify interval coverage by distance from nominal in both directions.
+
+    Nominal: coverage_10_90 = 0.80, coverage_25_75 = 0.50 (from chap-core).
+    Too low  → underdispersed (intervals too narrow, overconfident).
+    Too high → overdispersed (intervals too wide, uninformative).
+    Both directions count as errors.
+    """
+    dev_wide = abs(coverage_10_90 - COVERAGE_10_90_NOMINAL)
+    dev_mid = abs(coverage_25_75 - COVERAGE_25_75_NOMINAL)
+    if dev_wide <= COVERAGE_GOOD_TOLERANCE and dev_mid <= COVERAGE_GOOD_TOLERANCE:
         return "good"
-    if coverage_10_90 >= COVERAGE_10_90_LOW and coverage_25_75 >= COVERAGE_25_75_LOW:
+    if dev_wide <= COVERAGE_MODERATE_TOLERANCE and dev_mid <= COVERAGE_MODERATE_TOLERANCE:
         return "moderate"
     return "poor"
 
@@ -76,14 +96,18 @@ def _sensitivity_level(sensitivity: float | None, n_outbreaks: int) -> str:
 
 
 def _specificity_level(specificity: float | None, n_non_outbreaks: int) -> str:
-    """Classify false alarm rate."""
-    if n_non_outbreaks < MIN_OUTBREAKS_TO_JUDGE:
+    """Classify false alarm rate from specificity = TN / (TN + FP).
+
+    Uses its own thresholds — specificity and sensitivity measure different
+    things and need separate calibration.
+    """
+    if n_non_outbreaks < MIN_NON_OUTBREAKS_TO_JUDGE:
         return "too_few_non_outbreaks"
     if specificity is None:
         return "unknown"
-    if specificity >= SENSITIVITY_HIGH:
+    if specificity >= SPECIFICITY_HIGH:
         return "high"
-    if specificity >= SENSITIVITY_LOW:
+    if specificity >= SPECIFICITY_LOW:
         return "moderate"
     return "low"
 
@@ -106,6 +130,7 @@ def classify_evaluation(
         The dict is filtered to the fields relevant for the audience.
     """
     loc_map = anonymize_locations(result.locations)
+    anon_locations = list(loc_map.values())
     m = result.global_metrics
     o = result.outbreak_metrics
     c = o.counts
@@ -131,7 +156,6 @@ def classify_evaluation(
         "crps": m.crps,
         "mae": m.mae,
         "crps_quality": _crps_quality(m.crps_norm),
-        "beats_baseline": (m.crps_norm < CRPS_NORM_BASELINE) if m.crps_norm is not None else None,
 
         # calibration
         "ratio_above_truth": m.ratio_above_truth,
@@ -151,8 +175,8 @@ def classify_evaluation(
         "sensitivity_level": _sensitivity_level(o.sensitivity, n_outbreaks),
         "specificity_level": _specificity_level(o.specificity, n_non_outbreaks),
 
-        # anonymized locations
-        "location_map": loc_map,
+        # anonymized locations — only placeholders, no real names
+        "locations": anon_locations,
     }
 
     # ── audience filter ───────────────────────────────────────────────────
