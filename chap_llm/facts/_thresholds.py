@@ -3,9 +3,9 @@
 NOTE: These thresholds are preliminary and have NOT been validated by domain
 experts. They will be calibrated by the reference group (CLIM-1881).
 
-The only mathematically grounded boundary is CRPS_NORM_BASELINE = 1.0:
-crps_norm > 1.0 means the model is worse than a naive baseline, as defined
-by chap-core's normalization. All other values below are estimates.
+crps_norm = CRPS / (max_observed - min_observed). There is no mathematically
+grounded "good" boundary — all bands below are placeholders until the
+reference group sets them.
 """
 
 # ── CRPS (lower is better) ─────────────────────────────────────────────────
