@@ -252,6 +252,7 @@ See `QUESTIONS.md` (gitignored, local) for the full list. Key open items:
 2. REST API or CLI or both as the delivery mechanism for chap_llm.
 3. Which fields count as "identifying" for the privacy/anonymization rule?
 4. LIME: should chap_llm call `explain_lime()` itself, or consume pre-computed output?
+5. **Context-dependent thresholds (CLIM-1881).** Classification bands in `_thresholds.py` are currently global constants. Whether one set of bands fits all diseases (malaria vs dengue), countries, and temporal resolutions (weekly vs monthly) is an open question for the reference group. If context-dependent thresholds are needed, the classifiers in `facts/evaluation.py` will need to accept a context parameter. The current design supports this change without touching the contract or prompt layers.
 
 ## Status
 
