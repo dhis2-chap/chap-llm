@@ -1,6 +1,5 @@
 # chap-llm
 
-[![CI](https://github.com/dhis2-chap/chap-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/dhis2-chap/chap-llm/actions/workflows/ci.yml)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
 
 LLM-based building blocks that explain [Chap](https://chap.dhis2.org/) model results to different audiences — epidemiologists, district health officers, and decision makers.
