@@ -1,50 +1,35 @@
-"""Classification thresholds for evaluation metrics.
+"""Classification bands used by the facts layer.
 
-NOTE: These thresholds are preliminary and have NOT been validated by domain
-experts. They will be calibrated by the reference group (CLIM-1881).
-
-crps_norm = CRPS / (max_observed - min_observed). There is no mathematically
-grounded "good" boundary — all bands below are placeholders until the
-reference group sets them.
+PROVISIONAL. These are our own interpretation bands, not chap-core's (chap-core
+owns the *outbreak/alert* thresholds, which we reuse via the adapter). Whether one
+set of bands is valid across diseases, countries and temporal resolutions is an
+open question for the reference group. Keep every band here so it can be changed
+(or made configurable) in one place.
 """
 
-# ── CRPS (lower is better) ─────────────────────────────────────────────────
-# crps_norm = CRPS / (max_observed - min_observed in the forecast cells).
-# It expresses the average forecast error as a fraction of the observed range.
-# chap-core defines no "good" threshold — all bands below are placeholders.
-# TODO: validate ALL bands with reference group (CLIM-1881)
-CRPS_NORM_GOOD = 0.8       # TODO: placeholder — reference group must set this
-CRPS_NORM_MODERATE = 1.5   # TODO: placeholder — reference group must set this
+# crps_norm = CRPS / (max - min of observed values in the dataset).
+# Typical real-world values range from ~0.1 to >2.0.
+# TODO: validate with reference group (CLIM-1881) — these are placeholders only.
+CRPS_NORM_LOW_ERROR = 0.3           # below -> "low_error"
+CRPS_NORM_MODERATE_ERROR = 0.6      # below -> "moderate_error", else "high_error"
 
-# ── Calibration: ratio_above_truth (ideal = 0.5) ──────────────────────────
-# Share of forecast samples above the observed value.
-# 0.5 = perfectly unbiased. Outside the band = systematically biased.
-RATIO_CALIBRATED_LOW = 0.4   # TODO: validate
-RATIO_CALIBRATED_HIGH = 0.6  # TODO: validate
+# ratio_above_truth: share of samples above the observed value. 0.5 = unbiased.
+BIAS_TOLERANCE = 0.1                # |ratio - 0.5| <= tol -> "unbiased"
 
-# ── Coverage (should match the stated interval width) ─────────────────────
-# coverage_10_90 nominal = 0.80: 80% of actuals should fall inside the 10–90% interval
-# coverage_25_75 nominal = 0.50: 50% of actuals should fall inside the 25–75% interval
-# chap-core: "higher is better, up to the target" — beyond the target = overdispersed.
-# Classify by absolute distance from nominal in BOTH directions.
-COVERAGE_10_90_NOMINAL = 0.80
-COVERAGE_25_75_NOMINAL = 0.50
-COVERAGE_GOOD_TOLERANCE = 0.10    # TODO: validate with reference group (CLIM-1881)
-COVERAGE_MODERATE_TOLERANCE = 0.20  # TODO: validate
+# Prediction-interval coverage: nominal 0.80 (10-90) and 0.50 (25-75).
+COVERAGE_NOMINAL_10_90 = 0.80
+COVERAGE_NOMINAL_25_75 = 0.50
+COVERAGE_TOLERANCE = 0.1
 
-# ── Outbreak detection: sensitivity = TP / (TP + FN) ─────────────────────
-# "Of all real outbreaks, how many did the model catch?"
-SENSITIVITY_HIGH = 0.7   # TODO: validate — depends heavily on disease and context
-SENSITIVITY_LOW = 0.5    # TODO: validate
+# Sensitivity / specificity bands.
+RATE_HIGH = 0.8                     # >= -> "high"
+RATE_MODERATE = 0.5                 # >= -> "moderate", else "low"
 
-# ── False alarm rate: specificity = TN / (TN + FP) ───────────────────────
-# "Of all non-outbreak weeks, how many were correctly not alarmed?"
-# Different metric from sensitivity — needs its own thresholds.
-SPECIFICITY_HIGH = 0.7   # TODO: validate with reference group (CLIM-1881)
-SPECIFICITY_LOW = 0.5    # TODO: validate
+# Evidence thresholds (below these, rates are flagged as unreliable).
+MIN_EVENTS_FOR_RATE = 5             # outbreaks (sensitivity) / non-outbreaks (specificity)
+MIN_EVALUATED = 30                  # evaluated (location, period) cells
+MIN_SPLITS = 3
 
-# ── Data sufficiency ───────────────────────────────────────────────────────
-# Below these, outbreak metrics are unreliable.
-MIN_OUTBREAKS_TO_JUDGE = 5          # TODO: validate with reference group (CLIM-1881)
-MIN_NON_OUTBREAKS_TO_JUDGE = 5      # TODO: validate
-MIN_EVALUATED_TO_JUDGE = 10         # TODO: validate
+# Horizon trend: crps at longest horizon / crps at shortest horizon.
+# TODO: validate with reference group (CLIM-1881) — depends on disease and temporal resolution.
+HORIZON_DEGRADATION_RATIO = 1.25

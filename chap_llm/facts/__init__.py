@@ -1,3 +1,4 @@
-from chap_llm.facts._anonymize import anonymize_locations
+from chap_llm.facts._anonymize import location_aliases
+from chap_llm.facts.evaluation import build_evaluation_facts
 
-__all__ = ["anonymize_locations"]
+__all__ = ["build_evaluation_facts", "location_aliases"]

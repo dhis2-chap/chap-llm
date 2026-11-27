@@ -1,210 +1,265 @@
 """Facts layer for evaluation results.
 
-Takes an EvaluationResult contract and returns a source_facts dict ready
-for the prompt builder. All classification happens here — the LLM receives
-only finished facts, never raw numbers to interpret.
+Turns an ``EvaluationResult`` into a classified, anonymized, audience-filtered
+facts dict. Everything here is plain code: no LLM call, no prose.
 
-No imports from chap-core. No LLM calls.
+Conventions for the returned dict:
+- A key that is *absent* means "not relevant for this audience".
+- A value of ``None`` means "missing in the data" (never 0 or "").
+- Every classification is a machine-readable code; the prompt turns it into words.
+- No real location names and no raw case counts (privacy boundary, see
+  ARCHITECTURE.md "Privacy").
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Optional
 
-from chap_llm.contracts.evaluation import EvaluationResult
-from chap_llm.facts._anonymize import anonymize_locations
-from chap_llm.facts._thresholds import (
-    COVERAGE_10_90_NOMINAL,
-    COVERAGE_25_75_NOMINAL,
-    COVERAGE_GOOD_TOLERANCE,
-    COVERAGE_MODERATE_TOLERANCE,
-    CRPS_NORM_GOOD,
-    CRPS_NORM_MODERATE,
-    MIN_NON_OUTBREAKS_TO_JUDGE,
-    MIN_OUTBREAKS_TO_JUDGE,
-    RATIO_CALIBRATED_HIGH,
-    RATIO_CALIBRATED_LOW,
-    SENSITIVITY_HIGH,
-    SENSITIVITY_LOW,
-    SPECIFICITY_HIGH,
-    SPECIFICITY_LOW,
+from chap_llm.contracts.audience import Audience, validate_audience
+from chap_llm.contracts.evaluation import (
+    EvaluationResult,
+    HorizonResult,
+    MetricSet,
+    OutbreakMetrics,
 )
+from chap_llm.facts import _thresholds as t
+from chap_llm.facts._anonymize import location_aliases
 
-Audience = Literal["epidemiologist", "district_health_officer", "decision_maker"]
+DECIMALS = 3
 
 
-# ── classifiers ───────────────────────────────────────────────────────────────
+def _r(x: Optional[float]) -> Optional[float]:
+    return None if x is None else round(x, DECIMALS)
 
-def _crps_quality(crps_norm: float | None) -> str:
-    """Classify overall accuracy from crps_norm.
 
-    crps_norm = CRPS / observed_range. Lower is better.
-    Bands are placeholders pending reference group validation (CLIM-1881).
-    """
+# ── Classifiers (pure functions, individually tested) ─────────────────────────
+
+
+def classify_error(crps_norm: Optional[float]) -> str:
+    """Classify forecast accuracy from crps_norm (CRPS / observed range, lower is better)."""
     if crps_norm is None:
         return "unknown"
-    if crps_norm <= CRPS_NORM_GOOD:
-        return "good"
-    if crps_norm <= CRPS_NORM_MODERATE:
-        return "moderate"
-    return "poor"
+    if crps_norm < t.CRPS_NORM_LOW_ERROR:
+        return "low_error"
+    if crps_norm < t.CRPS_NORM_MODERATE_ERROR:
+        return "moderate_error"
+    return "high_error"
 
 
-def _calibration(ratio: float) -> str:
-    """Classify forecast bias from ratio_above_truth.
+def classify_bias(ratio_above_truth: float) -> str:
+    """Classify systematic forecast bias from ratio_above_truth.
 
-    ratio_above_truth = share of forecast samples above the observed value.
-    > 0.5 → more samples above than below → over-prediction bias.
-    < 0.5 → fewer samples above than below → under-prediction bias.
+    ratio_above_truth = share of samples above the observed value (0.5 = unbiased).
+    Above 0.5 + tolerance → overestimates; below 0.5 − tolerance → underestimates.
     """
-    if RATIO_CALIBRATED_LOW <= ratio <= RATIO_CALIBRATED_HIGH:
-        return "well_calibrated"
-    if ratio > RATIO_CALIBRATED_HIGH:
-        return "overestimates"   # most samples above truth → predicts too high
-    return "underestimates"      # most samples below truth → predicts too low
+    if ratio_above_truth > 0.5 + t.BIAS_TOLERANCE:
+        return "overestimates"
+    if ratio_above_truth < 0.5 - t.BIAS_TOLERANCE:
+        return "underestimates"
+    return "unbiased"
 
 
-def _coverage_quality(coverage_10_90: float, coverage_25_75: float) -> str:
-    """Classify interval coverage by distance from nominal in both directions.
+def classify_coverage(observed: float, nominal: float) -> str:
+    """Classify prediction-interval coverage by distance from the nominal target.
 
-    Nominal: coverage_10_90 = 0.80, coverage_25_75 = 0.50 (from chap-core).
-    Too low  → underdispersed (intervals too narrow, overconfident).
-    Too high → overdispersed (intervals too wide, uninformative).
-    Both directions count as errors.
+    Too wide → overdispersed (uninformative); too narrow → underdispersed (overconfident).
     """
-    dev_wide = abs(coverage_10_90 - COVERAGE_10_90_NOMINAL)
-    dev_mid = abs(coverage_25_75 - COVERAGE_25_75_NOMINAL)
-    if dev_wide <= COVERAGE_GOOD_TOLERANCE and dev_mid <= COVERAGE_GOOD_TOLERANCE:
-        return "good"
-    if dev_wide <= COVERAGE_MODERATE_TOLERANCE and dev_mid <= COVERAGE_MODERATE_TOLERANCE:
-        return "moderate"
-    return "poor"
+    if observed > nominal + t.COVERAGE_TOLERANCE:
+        return "intervals_too_wide"
+    if observed < nominal - t.COVERAGE_TOLERANCE:
+        return "intervals_too_narrow"
+    return "well_calibrated"
 
 
-def _sensitivity_level(sensitivity: float | None, n_outbreaks: int) -> str:
-    """Classify outbreak detection rate."""
-    if n_outbreaks < MIN_OUTBREAKS_TO_JUDGE:
-        return "too_few_outbreaks"
-    if sensitivity is None:
+def classify_rate(rate: Optional[float], n_events: int, too_few_code: str) -> str:
+    """Classify sensitivity/specificity.
+
+    ``unknown``  -> rate is None (no events at all; must never be read as 0 or 1)
+    ``too_few_*`` -> a rate exists but rests on too few events to judge
+    """
+    if rate is None:
         return "unknown"
-    if sensitivity >= SENSITIVITY_HIGH:
+    if n_events < t.MIN_EVENTS_FOR_RATE:
+        return too_few_code
+    if rate >= t.RATE_HIGH:
         return "high"
-    if sensitivity >= SENSITIVITY_LOW:
+    if rate >= t.RATE_MODERATE:
         return "moderate"
     return "low"
 
 
-def _specificity_level(specificity: float | None, n_non_outbreaks: int) -> str:
-    """Classify false alarm rate from specificity = TN / (TN + FP).
-
-    Uses its own thresholds — specificity and sensitivity measure different
-    things and need separate calibration.
-    """
-    if n_non_outbreaks < MIN_NON_OUTBREAKS_TO_JUDGE:
-        return "too_few_non_outbreaks"
-    if specificity is None:
+def classify_horizon_trend(per_horizon: list[HorizonResult]) -> str:
+    """Does error grow with forecast horizon? Compares CRPS at the shortest and
+    longest horizon."""
+    if len(per_horizon) < 2:
         return "unknown"
-    if specificity >= SPECIFICITY_HIGH:
-        return "high"
-    if specificity >= SPECIFICITY_LOW:
-        return "moderate"
-    return "low"
+    ordered = sorted(per_horizon, key=lambda h: h.horizon_distance)
+    first, last = ordered[0].metrics.crps, ordered[-1].metrics.crps
+    if first <= 0:
+        return "unknown"
+    return "degrades_with_horizon" if last / first >= t.HORIZON_DEGRADATION_RATIO else "stable"
 
 
-# ── public API ────────────────────────────────────────────────────────────────
+# ── Section builders ──────────────────────────────────────────────────────────
 
-def classify_evaluation(
-    result: EvaluationResult,
-    audience: Audience,
-) -> dict:
-    """Classify an EvaluationResult into a source_facts dict for the prompt.
 
-    Args:
-        result:   EvaluationResult from the adapter.
-        audience: One of "epidemiologist", "district_health_officer",
-                  "decision_maker".
-
-    Returns:
-        A flat dict of facts. All location names are anonymized.
-        The dict is filtered to the fields relevant for the audience.
-    """
-    loc_map = anonymize_locations(result.locations)
-    anon_locations = list(loc_map.values())
-    m = result.global_metrics
-    o = result.outbreak_metrics
-    c = o.counts
-    n_outbreaks = c.tp + c.fn
-    n_non_outbreaks = c.tn + c.fp
-
-    # ── core facts (all audiences) ────────────────────────────────────────
-    facts: dict = {
-        # metadata
-        "model_name": result.model_name,
-        "model_version": result.model_version,
-        "n_locations": len(result.locations),
-        "n_splits": result.n_splits,
-        "max_horizon": result.max_horizon,
-        "baseline_years_used": o.alert_policy.baseline_years_used,
-        "baseline_years_requested": o.alert_policy.baseline_years_requested,
-        "alert_strategy": o.alert_policy.strategy,
-        "alert_quantile": o.alert_policy.quantile,
-        "alert_exceedance_threshold": o.alert_policy.exceedance_threshold,
-        "n_evaluated": o.n_evaluated,
-
-        # accuracy
-        "crps": m.crps,
-        "mae": m.mae,
-        "crps_quality": _crps_quality(m.crps_norm),
-
-        # calibration
-        "ratio_above_truth": m.ratio_above_truth,
-        "calibration": _calibration(m.ratio_above_truth),
-
-        # coverage
-        "coverage_10_90": m.coverage_10_90,
-        "coverage_25_75": m.coverage_25_75,
-        "coverage_quality": _coverage_quality(m.coverage_10_90, m.coverage_25_75),
-
-        # outbreak detection
-        "n_outbreaks": n_outbreaks,
-        "n_non_outbreaks": n_non_outbreaks,
-        "tp": c.tp, "fp": c.fp, "fn": c.fn, "tn": c.tn,
-        "sensitivity": o.sensitivity,
-        "specificity": o.specificity,
-        "sensitivity_level": _sensitivity_level(o.sensitivity, n_outbreaks),
-        "specificity_level": _specificity_level(o.specificity, n_non_outbreaks),
-
-        # anonymized locations — only placeholders, no real names
-        "locations": anon_locations,
+def _metadata(r: EvaluationResult) -> dict[str, Any]:
+    return {
+        "model_name": r.model_name,
+        "model_version": r.model_version,
+        "n_splits": r.n_splits,
+        "max_horizon": r.max_horizon,
+        "n_locations": len(r.locations),
     }
 
-    # ── audience filter ───────────────────────────────────────────────────
-    return _filter_for_audience(facts, audience)
+
+def _accuracy(m: MetricSet, with_numbers: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"error_level": classify_error(m.crps_norm)}
+    if with_numbers:
+        out |= {"crps": _r(m.crps), "crps_norm": _r(m.crps_norm), "mae": _r(m.mae)}
+    return out
 
 
-def _filter_for_audience(facts: dict, audience: Audience) -> dict:
-    """Remove fields not relevant for the given audience."""
+def _calibration(m: MetricSet, with_numbers: bool) -> dict[str, Any]:
+    out: dict[str, Any] = {"bias": classify_bias(m.ratio_above_truth)}
+    if with_numbers:
+        out["ratio_above_truth"] = _r(m.ratio_above_truth)
+    return out
 
-    # decision_maker: high-level only — no raw metric values
-    if audience == "decision_maker":
-        remove = {
-            "crps", "mae", "ratio_above_truth",
-            "coverage_10_90", "coverage_25_75",
-            "tp", "fp", "fn", "tn",
-            "sensitivity", "specificity",
-            "alert_quantile", "alert_exceedance_threshold",
-            "baseline_years_requested",
+
+def _interval_coverage(m: MetricSet) -> dict[str, Any]:
+    return {
+        "coverage_10_90": _r(m.coverage_10_90),
+        "coverage_10_90_nominal": t.COVERAGE_NOMINAL_10_90,
+        "coverage_10_90_class": classify_coverage(m.coverage_10_90, t.COVERAGE_NOMINAL_10_90),
+        "coverage_25_75": _r(m.coverage_25_75),
+        "coverage_25_75_nominal": t.COVERAGE_NOMINAL_25_75,
+        "coverage_25_75_class": classify_coverage(m.coverage_25_75, t.COVERAGE_NOMINAL_25_75),
+    }
+
+
+def _horizons(r: EvaluationResult) -> dict[str, Any]:
+    return {
+        "trend": classify_horizon_trend(r.per_horizon),
+        "by_horizon": [
+            {
+                "horizon_distance": h.horizon_distance,
+                "n_evaluated": h.n_evaluated,
+                "crps": _r(h.metrics.crps),
+                "mae": _r(h.metrics.mae),
+                "bias": classify_bias(h.metrics.ratio_above_truth),
+            }
+            for h in sorted(r.per_horizon, key=lambda h: h.horizon_distance)
+        ],
+    }
+
+
+def _locations(r: EvaluationResult) -> list[dict[str, Any]]:
+    alias = location_aliases(r.locations)
+    return [
+        {
+            "location": alias[loc.location],
+            "n_evaluated": loc.n_evaluated,
+            "crps": _r(loc.metrics.crps),
+            "mae": _r(loc.metrics.mae),
+            "bias": classify_bias(loc.metrics.ratio_above_truth),
+            "coverage_10_90_class": classify_coverage(
+                loc.metrics.coverage_10_90, t.COVERAGE_NOMINAL_10_90
+            ),
         }
-        return {k: v for k, v in facts.items() if k not in remove}
+        for loc in sorted(r.per_location, key=lambda x: alias[x.location])
+    ]
 
-    # district_health_officer: operational — no crps_norm internals
-    if audience == "district_health_officer":
-        remove = {
-            "crps", "ratio_above_truth",
-            "coverage_10_90", "coverage_25_75",
-            "alert_quantile", "alert_exceedance_threshold",
-        }
-        return {k: v for k, v in facts.items() if k not in remove}
 
-    # epidemiologist: everything
+def _outbreak(o: OutbreakMetrics, *, with_counts: bool, with_rates: bool) -> dict[str, Any]:
+    c = o.counts
+    n_outbreaks, n_non_outbreaks = c.tp + c.fn, c.tn + c.fp
+    p = o.alert_policy
+    out: dict[str, Any] = {
+        "n_outbreaks": n_outbreaks,
+        "n_non_outbreaks": n_non_outbreaks,
+        "n_alerts": c.tp + c.fp,
+        "n_evaluated": o.n_evaluated,
+        "sensitivity_status": classify_rate(o.sensitivity, n_outbreaks, "too_few_outbreaks"),
+        "specificity_status": classify_rate(o.specificity, n_non_outbreaks, "too_few_non_outbreaks"),
+    }
+    if with_rates:
+        out |= {"sensitivity": _r(o.sensitivity), "specificity": _r(o.specificity)}
+    if with_counts:
+        out["counts"] = {"tp": c.tp, "fp": c.fp, "fn": c.fn, "tn": c.tn}
+    out["alert_policy"] = {  # always stated: the threshold strategy changes conclusions
+        "strategy": p.strategy,
+        "quantile": p.quantile,
+        "baseline_years_requested": p.baseline_years_requested,
+        "baseline_years_used": p.baseline_years_used,
+        "exceedance_threshold": p.exceedance_threshold,
+        "source": p.source,
+    }
+    return out
+
+
+def _caveats(r: EvaluationResult) -> list[str]:
+    """Machine-readable limitation codes. The prompt phrases them."""
+    o, c = r.outbreak_metrics, r.outbreak_metrics.counts
+    n_outbreaks, n_non_outbreaks = c.tp + c.fn, c.tn + c.fp
+    codes = ["backtest_only"]  # explains past performance, not live alerts
+    if o.alert_policy.baseline_years_used < o.alert_policy.baseline_years_requested:
+        codes.append("short_baseline")
+    if n_outbreaks == 0:
+        codes.append("no_outbreaks")
+    elif n_outbreaks < t.MIN_EVENTS_FOR_RATE:
+        codes.append("few_outbreaks")
+    if n_non_outbreaks == 0:
+        codes.append("no_non_outbreaks")
+    elif n_non_outbreaks < t.MIN_EVENTS_FOR_RATE:
+        codes.append("few_non_outbreaks")
+    if o.n_evaluated < t.MIN_EVALUATED:
+        codes.append("small_evaluation_sample")
+    if r.n_splits < t.MIN_SPLITS:
+        codes.append("few_splits")
+    if r.model_version is None:
+        codes.append("model_version_unknown")
+    return codes
+
+
+# ── Public entry point ────────────────────────────────────────────────────────
+
+
+def build_evaluation_facts(result: EvaluationResult, audience: str) -> dict[str, Any]:
+    """Classify an evaluation and select the facts the given audience needs.
+
+    The returned dict is JSON-serializable and is what goes into both the prompt
+    and ``ExplanationResponse.source_facts``.
+    """
+    aud: Audience = validate_audience(audience)
+    g = result.global_metrics
+    facts: dict[str, Any] = {
+        "audience": aud,
+        "result_type": "evaluation",
+        "metadata": _metadata(result),
+    }
+
+    if aud == "epidemiologist":
+        facts["accuracy"] = _accuracy(g, with_numbers=True)
+        facts["calibration"] = _calibration(g, with_numbers=True)
+        facts["interval_coverage"] = _interval_coverage(g)
+        facts["horizons"] = _horizons(result)
+        facts["locations"] = _locations(result)
+        facts["outbreak_detection"] = _outbreak(
+            result.outbreak_metrics, with_counts=True, with_rates=True
+        )
+    elif aud == "district_health_officer":
+        facts["accuracy"] = _accuracy(g, with_numbers=False)
+        facts["calibration"] = _calibration(g, with_numbers=False)
+        facts["outbreak_detection"] = _outbreak(
+            result.outbreak_metrics, with_counts=True, with_rates=True
+        )
+    else:  # decision_maker: classes only, no metric jargon or counts
+        facts["accuracy"] = _accuracy(g, with_numbers=False)
+        facts["calibration"] = _calibration(g, with_numbers=False)
+        facts["outbreak_detection"] = _outbreak(
+            result.outbreak_metrics, with_counts=False, with_rates=False
+        )
+
+    facts["caveats"] = _caveats(result)
     return facts

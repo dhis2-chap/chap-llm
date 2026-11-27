@@ -77,12 +77,12 @@ Every LLM endpoint returns an `ExplanationResponse`:
 class ExplanationResponse(BaseModel):
     audience: Literal["epidemiologist", "district_health_officer", "decision_maker"]
     result_type: Literal["evaluation", "xai", "alarm"]
-    explanation_text: str          # natural language, written by the LLM
+    explanation: dict              # structured JSON produced by the LLM (see Prompt section)
     chart_data: dict | None        # structured JSON for the frontend to render
     source_facts: dict             # the facts dict passed to the LLM — for audit and output check
 ```
 
-`source_facts` is the structured dict the facts layer produced and the prompt injected. It is returned alongside the text so the output check can verify that numbers in `explanation_text` match `source_facts`. It is also useful for debugging prompts.
+`explanation` is a structured JSON dict produced by the LLM following the schema defined in the system prompt (see `## Prompt` below). `source_facts` is the classified facts dict the prompt injected — returned for audit and so the output check can verify numbers match.
 
 ## Sequence: evaluation explanation request
 
@@ -101,9 +101,9 @@ sequenceDiagram
     A-->>F: EvaluationResult (Pydantic)
     F->>F: classify metrics, filter by audience
     F-->>L: source_facts dict + prompt
-    L-->>OC: explanation_text
-    OC->>OC: verify numbers in text match source_facts
-    OC-->>Caller: ExplanationResponse\n(text + chart_data + source_facts)
+    L-->>OC: explanation (JSON dict)
+    OC->>OC: verify numbers in JSON match source_facts
+    OC-->>Caller: ExplanationResponse\n(explanation JSON + chart_data + source_facts)
 ```
 
 ## Adapter
@@ -128,6 +128,53 @@ from chap_core.database.alert_tables import AlertLevel
 from chap_core.assessment.thresholds.params import PercentileParams
 from chap_core.assessment.thresholds.percentile import filter_to_baseline
 ```
+
+## Prompt
+
+```
+chap_llm/prompt/
+    evaluation_epidemiologist.py    SYSTEM_PROMPT for epidemiologist audience
+    evaluation_district_health_officer.py  SYSTEM_PROMPT for district health officer audience
+    evaluation_decision_maker.py    SYSTEM_PROMPT for decision maker audience
+    _shared.py                      rules/glossary/output-rule text identical across audiences (no conditionals)
+    builder.py                      build_prompt(facts, audience) → (system_prompt, user_prompt)
+```
+
+Three separate system prompt files — one per audience. Audiences differ enough in tone, detail level, and output structure that shared templates with conditionals would be harder to read and maintain.
+
+### System prompt vs user prompt
+
+| Part | Contains | Must NOT contain |
+|---|---|---|
+| System prompt | Role definition, output schema, rules (never invent numbers, never name locations) | Any facts from this evaluation |
+| User prompt | The `source_facts` dict for this specific evaluation, injected as structured text | Instructions or rules |
+
+### Output format
+
+The LLM returns a JSON dict. The schema is defined in the system prompt via a JSON template — not via `response_format: { type: "json_object" }` (vendor-specific, not supported by all local LLMs). Instead, the system prompt instructs: "return only valid JSON, no prose before or after".
+
+```json
+{
+  "summary": "One or two plain sentences. Always present for all audiences.",
+  "sections": [
+    { "heading": "Accuracy", "body": "..." },
+    { "heading": "Outbreak detection", "body": "..." }
+  ],
+  "caveats": "Limitations, uncertainty, or what the model cannot say."
+}
+```
+
+`sections` is audience-dependent:
+- `epidemiologist` — Accuracy, Calibration, Interval coverage, Outbreak detection
+- `district_health_officer` — Alert reliability, Limitations
+- `decision_maker` — `sections` is empty; only `summary` and `caveats` are used
+
+### Rules enforced in the system prompt (and re-checked by the output check)
+
+- Never mention a number that is not in `source_facts`.
+- Never name a location — only placeholders like "District A".
+- Never explain what CRPS is to a decision maker.
+- If a metric is marked `unknown` or `too_few_outbreaks`, say so — do not omit or invent.
 
 ## How Chap defines things (verified in chap-core v2.7.0.dev0)
 
@@ -259,8 +306,8 @@ See `QUESTIONS.md` (gitignored, local) for the full list. Key open items:
 - [x] chap-core v2.7.0.dev0 installed from clone; example evaluation run
 - [x] `load_evaluation()` — global, per-location, per-horizon metrics, alert data, metadata
 - [x] Tests: global metrics match `metrics.csv`; per-location averages match global; `specificity=None` case; short-baseline flag
-- [ ] Facts layer for evaluation (all three audiences)
-- [ ] Prompt templates (all three audiences)
+- [x] Facts layer for evaluation (all three audiences) — `chap_llm/facts/`; bands in `facts/thresholds.py` are provisional
+- [x] Prompt templates (all three audiences) — `chap_llm/prompt/`
 - [ ] Provider-agnostic LLM client
 - [ ] `ExplanationResponse` contract + output check
 - [ ] Eval harness (deterministic → LLM-as-judge → human calibration)
