@@ -64,7 +64,7 @@ Audience is a parameter passed by the caller — never inferred automatically.
 | Value | Reader | Focus |
 |---|---|---|
 | `epidemiologist` | Technical — understands CRPS, sensitivity, baselines | Full metric detail, caveats, methodology |
-| `district_health_manager` | Operational — acts on alerts | Whether the model can be trusted for decisions, what alerts mean |
+| `district_health_officer` | Operational — acts on alerts | Whether the model can be trusted for decisions, what alerts mean |
 | `decision_maker` | Strategic — allocates resources | High-level reliability, what the system does and doesn't know |
 
 The facts layer filters which facts are included per audience. The prompt template sets tone and detail level.
@@ -75,14 +75,14 @@ Every LLM endpoint returns an `ExplanationResponse`:
 
 ```python
 class ExplanationResponse(BaseModel):
-    audience: Literal["epidemiologist", "district_health_manager", "decision_maker"]
+    audience: Literal["epidemiologist", "district_health_officer", "decision_maker"]
     result_type: Literal["evaluation", "xai", "alarm"]
-    explanation_text: str          # natural language, written by the LLM
+    explanation: dict              # structured JSON produced by the LLM (see Prompt section)
     chart_data: dict | None        # structured JSON for the frontend to render
     source_facts: dict             # the facts dict passed to the LLM — for audit and output check
 ```
 
-`source_facts` is the structured dict the facts layer produced and the prompt injected. It is returned alongside the text so the output check can verify that numbers in `explanation_text` match `source_facts`. It is also useful for debugging prompts.
+`explanation` is a structured JSON dict produced by the LLM following the schema defined in the system prompt (see `## Prompt` below). `source_facts` is the classified facts dict the prompt injected — returned for audit and so the output check can verify numbers match.
 
 ## Sequence: evaluation explanation request
 
@@ -101,9 +101,9 @@ sequenceDiagram
     A-->>F: EvaluationResult (Pydantic)
     F->>F: classify metrics, filter by audience
     F-->>L: source_facts dict + prompt
-    L-->>OC: explanation_text
-    OC->>OC: verify numbers in text match source_facts
-    OC-->>Caller: ExplanationResponse\n(text + chart_data + source_facts)
+    L-->>OC: explanation (JSON dict)
+    OC->>OC: verify numbers in JSON match source_facts
+    OC-->>Caller: ExplanationResponse\n(explanation JSON + chart_data + source_facts)
 ```
 
 ## Adapter
@@ -128,6 +128,53 @@ from chap_core.database.alert_tables import AlertLevel
 from chap_core.assessment.thresholds.params import PercentileParams
 from chap_core.assessment.thresholds.percentile import filter_to_baseline
 ```
+
+## Prompt
+
+```
+chap_llm/prompt/
+    evaluation_epidemiologist.py    SYSTEM_PROMPT for epidemiologist audience
+    evaluation_district_health_officer.py  SYSTEM_PROMPT for district health officer audience
+    evaluation_decision_maker.py    SYSTEM_PROMPT for decision maker audience
+    _shared.py                      rules/glossary/output-rule text identical across audiences (no conditionals)
+    builder.py                      build_prompt(facts, audience) → (system_prompt, user_prompt)
+```
+
+Three separate system prompt files — one per audience. Audiences differ enough in tone, detail level, and output structure that shared templates with conditionals would be harder to read and maintain.
+
+### System prompt vs user prompt
+
+| Part | Contains | Must NOT contain |
+|---|---|---|
+| System prompt | Role definition, output schema, rules (never invent numbers, never name locations) | Any facts from this evaluation |
+| User prompt | The `source_facts` dict for this specific evaluation, injected as structured text | Instructions or rules |
+
+### Output format
+
+The LLM returns a JSON dict. The schema is defined in the system prompt via a JSON template — not via `response_format: { type: "json_object" }` (vendor-specific, not supported by all local LLMs). Instead, the system prompt instructs: "return only valid JSON, no prose before or after".
+
+```json
+{
+  "summary": "One or two plain sentences. Always present for all audiences.",
+  "sections": [
+    { "heading": "Accuracy", "body": "..." },
+    { "heading": "Outbreak detection", "body": "..." }
+  ],
+  "caveats": "Limitations, uncertainty, or what the model cannot say."
+}
+```
+
+`sections` is audience-dependent:
+- `epidemiologist` — Accuracy, Calibration, Interval coverage, Outbreak detection
+- `district_health_officer` — Alert reliability, Limitations
+- `decision_maker` — `sections` is empty; only `summary` and `caveats` are used
+
+### Rules enforced in the system prompt (and re-checked by the output check)
+
+- Never mention a number that is not in `source_facts`.
+- Never name a location — only placeholders like "District A".
+- Never explain what CRPS is to a decision maker.
+- If a metric is marked `unknown` or `too_few_outbreaks`, say so — do not omit or invent.
 
 ## How Chap defines things (verified in chap-core v2.7.0.dev0)
 
@@ -207,6 +254,35 @@ The caller sets the mode via the LLM client configuration. The facts layer outpu
 - Patient-level or individual-level data of any kind
 - Model training data
 
+## Keeping up with chap-core changes
+
+Three kinds of change can happen in chap-core, and each requires a different response.
+
+### Type 1 — Format change (file structure, variable names, API)
+
+Only the adapter is affected. The contract, facts layer, prompts and eval harness notice nothing.
+
+**How we handle it:** the adapter is the only place that imports from chap-core. Update the adapter, re-run tests. Everything else stays the same.
+
+**Example already seen:** between v2.5.1 and v2.7.0, outbreak metrics were removed from the CLI. Only the adapter needed updating.
+
+### Type 2 — Meaning change (how metrics or "outbreak" is defined)
+
+This is dangerous because it can pass silently. The adapter still fills the contract, but the numbers mean something different and explanations become wrong without anything crashing.
+
+**How we protect against it:**
+
+1. **Use chap-core's own functions** (`calculate_metrics()`, `score()`, `label_cells()`) instead of reimplementing. When Chap changes its definition, we follow automatically.
+2. **Include metadata in the contract.** `EvaluationResult` carries `schema_version`, `model_version`, and `AlertPolicyInfo` (strategy, quantile, baseline years, exceedance threshold). Every explanation states what it is built on.
+3. **Contract tests against real output (golden files).** If numbers change after a chap-core update, the test fails immediately. See `tests/test_evaluation_adapter.py` — it compares against `chap-core/metrics.csv`.
+4. **Pin the chap-core version and upgrade deliberately.** `pyproject.toml` uses an editable install from the clone. Upgrading the clone is a conscious act, not an accident.
+
+### Type 3 — New result types or new audience needs
+
+A normal evolution, not a breaking change.
+
+**How we handle it:** add new fields as `Optional` in the contract. Old code continues to work. New code can use the new fields. Never remove or rename existing fields without a version bump in `schema_version`.
+
 ## Known limitations
 
 - Laos example data has only ~3 years of history; thresholds are unstable.
@@ -223,14 +299,15 @@ See `QUESTIONS.md` (gitignored, local) for the full list. Key open items:
 2. REST API or CLI or both as the delivery mechanism for chap_llm.
 3. Which fields count as "identifying" for the privacy/anonymization rule?
 4. LIME: should chap_llm call `explain_lime()` itself, or consume pre-computed output?
+5. **Context-dependent thresholds (CLIM-1881).** Classification bands in `_thresholds.py` are currently global constants. Whether one set of bands fits all diseases (malaria vs dengue), countries, and temporal resolutions (weekly vs monthly) is an open question for the reference group. If context-dependent thresholds are needed, the classifiers in `facts/evaluation.py` will need to accept a context parameter. The current design supports this change without touching the contract or prompt layers.
 
 ## Status
 
 - [x] chap-core v2.7.0.dev0 installed from clone; example evaluation run
 - [x] `load_evaluation()` — global, per-location, per-horizon metrics, alert data, metadata
 - [x] Tests: global metrics match `metrics.csv`; per-location averages match global; `specificity=None` case; short-baseline flag
-- [ ] Facts layer for evaluation (all three audiences)
-- [ ] Prompt templates (all three audiences)
+- [x] Facts layer for evaluation (all three audiences) — `chap_llm/facts/`; bands in `facts/thresholds.py` are provisional
+- [x] Prompt templates (all three audiences) — `chap_llm/prompt/`
 - [ ] Provider-agnostic LLM client
 - [ ] `ExplanationResponse` contract + output check
 - [ ] Eval harness (deterministic → LLM-as-judge → human calibration)
